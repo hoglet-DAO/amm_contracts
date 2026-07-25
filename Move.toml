@@ -1,0 +1,46 @@
+[package]
+name = "amm"
+version = "1.0.0"
+authors = []
+
+[addresses]
+
+spike_amm = "0x3045d27b5fada1e30897a741fb184e48ef0bff3717aea23918ebc1e5c7153083"
+spike_staking = "0x3045d27b5fada1e30897a741fb184e48ef0bff3717aea23918ebc1e5c7153083"
+admin = "0x3045d27b5fada1e30897a741fb184e48ef0bff3717aea23918ebc1e5c7153083"
+fee_admin = "0x3045d27b5fada1e30897a741fb184e48ef0bff3717aea23918ebc1e5c7153083"
+razor_libs = "0x3045d27b5fada1e30897a741fb184e48ef0bff3717aea23918ebc1e5c7153083"
+BWSUP_ADDRESS = "0x3db05342523bd72817b09f264761a7621eeb21d0960d9676ba5ce14651b17c43"
+
+[dev-addresses]
+
+[dependencies.SupraFramework]
+git = "https://github.com/Entropy-Foundation/aptos-core.git"
+rev = "dev"
+subdir = "aptos-move/framework/supra-framework"
+
+[dependencies.AptosTokenObjects]
+git = "https://github.com/Entropy-Foundation/aptos-core.git"
+rev = "dev"
+subdir = "aptos-move/framework/aptos-token-objects"
+
+[dependencies.AptosToken]
+git = "https://github.com/Entropy-Foundation/aptos-core.git"
+rev = "dev"
+subdir = "aptos-move/framework/aptos-token"
+
+[dependencies.RazorLibs]
+git = "https://github.com/spikeyfun/razor-libs.git"
+rev = "main"
+
+[dependencies.spike_staking]
+git = "https://github.com/Spikeyfun/spike_interfaces.git"
+rev = "main"
+subdir = "stake_fa"
+
+[dependencies.core]
+git = "https://github.com/Entropy-Foundation/dora-interface"
+rev = "master"
+subdir = "supra/mainnet/core"
+
+[dev-dependencies]
