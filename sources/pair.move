@@ -12,13 +12,17 @@ module spike_amm::amm_pair {
   use supra_framework::object::{Self, Object, ConstructorRef};
   use supra_framework::primary_fungible_store;
   use supra_framework::timestamp;
+  use supra_framework::coin;
+  use supra_framework::supra_coin::SupraCoin;
 
   use spike_amm::amm_controller;
+  
+  use dfmm_framework::poel;
 
   use razor_libs::math;
   use razor_libs::fixedpoint64;
   use razor_libs::sort;
-  use razor_libs::token_utils;
+  use razor_libs::utils;
   use aptos_std::math64;
   use aptos_std::smart_table::{Self, SmartTable};
 
@@ -72,6 +76,11 @@ module spike_amm::amm_pair {
     price_1_cumulative_last: u128,
     k_last: u128,
     locked: bool,
+  }
+
+  #[resource_group_member(group = supra_framework::object::ObjectGroup)]
+  struct PairExtendRef has key {
+      extend_ref: object::ExtendRef,
   }
 
   #[event]
@@ -166,7 +175,7 @@ module spike_amm::amm_pair {
       );
 
       let bps = amm_controller::get_flash_loan_fee_bps(); 
-      let fee = ((((amount as u128) * (bps as u128)) / 10000) as u64);
+      let fee = ((((amount as u128) * (bps as u128) + 9999) / 10000) as u64);
       
       let store_to_withdraw_from = if (token_to_borrow == token0) {
           lp_data.token0
@@ -216,10 +225,7 @@ module spike_amm::amm_pair {
       let record = smart_table::remove(state, pair_addr);
       assert!(record.amount_loaned == amount_loaned && record.token_borrowed == token_borrowed, error::invalid_argument(ERROR_WRONG_RECEIPT));
 
-      let payment_amount = fungible_asset::amount(&payment);
       let required_amount = amount_loaned + fee;
-
-      assert!(payment_amount >= required_amount, error::invalid_argument(ERROR_INSUFFICIENT_REPAYMENT));
       assert!(fungible_asset::asset_metadata(&payment) == token_borrowed, error::invalid_argument(ERROR_WRONG_TOKEN));
 
       let token0 = fungible_asset::store_metadata(lp.token0);
@@ -229,9 +235,18 @@ module spike_amm::amm_pair {
           lp.token1
       };
 
+      let balance_before = fungible_asset::balance(store_to_deposit);
       dispatchable_fungible_asset::deposit(store_to_deposit, payment);
+      let balance_after = fungible_asset::balance(store_to_deposit);
+      
+      let actual_payment_amount = balance_after - balance_before;
+      assert!(actual_payment_amount >= required_amount, error::invalid_argument(ERROR_INSUFFICIENT_REPAYMENT));
       
       lp.locked = false;
+  }
+
+  public fun flash_loan_receipt_token(receipt: &FlashLoanReceipt): Object<Metadata> {
+      receipt.token_borrowed
   }
 
   inline fun get_mut_flash_loan_state(): &mut SmartTable<address, FlashLoanRecord> {
@@ -336,6 +351,9 @@ module spike_amm::amm_pair {
     let pair_signer = &object::generate_signer(pair_constructor_ref);
     let lp_token = object::object_from_constructor_ref<Metadata>(pair_constructor_ref);
     fungible_asset::create_store(pair_constructor_ref, lp_token);
+    
+    // Removed invalid coin::register<SupraCoin>(pair_signer) because Objects cannot have CoinStore
+
     move_to(pair_signer, Pair {
       token0: create_token_store(pair_signer, token0),
       token1: create_token_store(pair_signer, token1),
@@ -347,9 +365,58 @@ module spike_amm::amm_pair {
       locked: false,
     });
 
+    move_to(pair_signer, PairExtendRef {
+        extend_ref: object::generate_extend_ref(pair_constructor_ref)
+    });
+
     let pair = object::convert(lp_token);
 
     pair
+  }
+
+  // =================================================================
+  // YIELD SWEEPING (Phase 4 Integration)
+  // =================================================================
+
+  fun generate_signer_for_pair(pair: Object<Pair>): signer acquires PairExtendRef {
+      let pair_addr = object::object_address(&pair);
+      let extend_data = borrow_global<PairExtendRef>(pair_addr);
+      object::generate_signer_for_extending(&extend_data.extend_ref)
+  }
+
+  public entry fun claim_and_sweep(pair: Object<Pair>) acquires PairExtendRef {
+      let pair_addr = object::object_address(&pair);
+      if (!exists<PairExtendRef>(pair_addr)) {
+          return
+      };
+      
+      let pair_signer = &generate_signer_for_pair(pair);
+      
+      // Phase Duration set to 1 day (86400 seconds)
+      let current_time = timestamp::now_seconds();
+      let phases_since_epoch = current_time / 86400;
+      
+      if (phases_since_epoch % 2 == 0) {
+          // Even phase (Day 1): Claim rewards to start the lockup timer
+          poel::claim_rewards(pair_signer);
+      } else {
+          // Odd phase (Day 2): Lockup cycle has passed, safe to withdraw
+          let supra_metadata = option::destroy_some(coin::paired_metadata<SupraCoin>());
+          let balance_before = primary_fungible_store::balance(pair_addr, supra_metadata);
+          
+          // Withdraw rewards from PoEL (deposits FA into the pair's PrimaryFungibleStore)
+          poel::withdraw_rewards(pair_signer);
+          
+          let balance_after = primary_fungible_store::balance(pair_addr, supra_metadata);
+          let yield_earned = balance_after - balance_before;
+          
+          if (yield_earned > 0) {
+              // Extract the exact yield and send it to the official protocol fee_to
+              let yield_fa = primary_fungible_store::withdraw(pair_signer, supra_metadata, yield_earned);
+              let fee_to = amm_controller::get_fee_to();
+              primary_fungible_store::deposit(fee_to, yield_fa);
+          }
+      }
   }
 
   #[view]
@@ -662,6 +729,81 @@ module spike_amm::amm_pair {
 
     assert_k_increase(balance0, balance1, actual_amount0_in, actual_amount1_in, reserve0, reserve1, swap_fee);
     update(lp, balance0, balance1, reserve0, reserve1);
+
+    let pair_address = liquidity_pool_address(fungible_asset::store_metadata(lp.token0), fungible_asset::store_metadata(lp.token1));
+    
+    event::emit(SwapEvent {
+      sender: signer::address_of(sender),
+      amount0_in: actual_amount0_in,
+      amount1_in: actual_amount1_in,
+      amount0_out,
+      amount1_out,
+      pair_address: pair_address,
+      to,
+    });
+    unlock_pair(lp);
+    (token0_out, token1_out)
+  }
+
+  public(friend) fun swap_fee_on_transfer(
+    sender: &signer,
+    pair: Object<Pair>,
+    token0_in: FungibleAsset,
+    token1_in: FungibleAsset,
+    to: address,
+  ): (FungibleAsset, FungibleAsset) acquires Pair {
+    amm_controller::assert_unpaused();
+    let lp_data = pair_data(&pair);
+    assert!(!lp_data.locked, error::permission_denied(ERROR_LOCKED));
+    let declared_amount0_in = fungible_asset::amount(&token0_in);
+    let declared_amount1_in = fungible_asset::amount(&token1_in);
+
+    assert!(declared_amount0_in > 0 || declared_amount1_in > 0, error::invalid_argument(ERROR_INSUFFICIENT_INPUT_AMOUNT));
+
+    let lp = pair_data_mut(&pair);
+    lock_pair(lp);
+    let store0 = lp.token0;
+    let store1 = lp.token1;
+    let reserve0 = fungible_asset::balance(store0);
+    let reserve1 = fungible_asset::balance(store1);
+
+    if (declared_amount0_in > 0) {
+        dispatchable_fungible_asset::deposit(store0, token0_in);
+    } else {
+        fungible_asset::destroy_zero(token0_in);
+    };
+
+    if (declared_amount1_in > 0) {
+        dispatchable_fungible_asset::deposit(store1, token1_in);
+    } else {
+        fungible_asset::destroy_zero(token1_in);
+    };
+
+    let balance0 = fungible_asset::balance(store0);
+    let balance1 = fungible_asset::balance(store1);
+
+    let actual_amount0_in = if (balance0 > reserve0) { balance0 - reserve0 } else { 0 };
+    let actual_amount1_in = if (balance1 > reserve1) { balance1 - reserve1 } else { 0 };
+
+    let amount0_out = if (actual_amount1_in > 0) {
+        utils::get_amount_out(actual_amount1_in, reserve1, reserve0)
+    } else { 0 };
+
+    let amount1_out = if (actual_amount0_in > 0) {
+        utils::get_amount_out(actual_amount0_in, reserve0, reserve1)
+    } else { 0 };
+
+    let swap_signer = &amm_controller::get_signer();
+    let token0_out = dispatchable_fungible_asset::withdraw(swap_signer, store0, amount0_out);
+    let token1_out = dispatchable_fungible_asset::withdraw(swap_signer, store1, amount1_out);
+
+    let final_balance0 = fungible_asset::balance(store0);
+    let final_balance1 = fungible_asset::balance(store1);
+    
+    let swap_fee = amm_controller::get_swap_fee();
+
+    assert_k_increase(final_balance0, final_balance1, actual_amount0_in, actual_amount1_in, reserve0, reserve1, swap_fee);
+    update(lp, final_balance0, final_balance1, reserve0, reserve1);
 
     let pair_address = liquidity_pool_address(fungible_asset::store_metadata(lp.token0), fungible_asset::store_metadata(lp.token1));
     

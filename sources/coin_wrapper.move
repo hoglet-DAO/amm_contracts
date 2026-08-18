@@ -8,6 +8,7 @@ module spike_amm::coin_wrapper {
     use supra_framework::primary_fungible_store;
     use supra_framework::supra_coin::SupraCoin;
     use supra_framework::event;
+    use dfmm_framework::poel;
 
     use aptos_std::smart_table::{Self, SmartTable};
     use aptos_std::string_utils;
@@ -22,13 +23,16 @@ module spike_amm::coin_wrapper {
     friend spike_amm::amm_router;
     friend spike_amm::router_stake;
     friend spike_amm::amm_factory;
-    friend spike_amm::flash_loan_router; 
+    friend spike_amm::flash_loan_router;
+    //friend spike_staking::router_xfa;
 
     const COIN_WRAPPER_NAME: vector<u8> = b"COIN_YEET_FUNGIBLE";
 
     const ERROR_INSUFFICIENT_AMOUNT: u64 = 901;
     const ERROR_INVALID_REPAYMENT: u64 = 902;
     const ERROR_NOT_ADMIN: u64 = 903;
+    const ERROR_ALREADY_WRAPPED: u64 = 904;
+    const ERROR_USE_COIN_WRAPPER_V1: u64 = 905;
     const FLASH_LOAN_FEE_BPS: u64 = 5;
 
     struct FungibleAssetData has store {
@@ -47,6 +51,28 @@ module spike_amm::coin_wrapper {
     struct FlashLoanReceipt<phantom CoinType> {
         amount: u64,
         fee: u64
+    }
+
+    // =========================================================================
+    // V2 UPGRADE: FA NATIVE SUPPORT (Liquidity Vault)
+    // =========================================================================
+
+    struct WrapperAccountFA has key {
+        native_to_wrapper: SmartTable<Object<Metadata>, FungibleAssetData>,
+        wrapper_to_native: SmartTable<Object<Metadata>, Object<Metadata>>,
+    }
+
+    struct FlashLoanReceiptFA {
+        amount: u64,
+        fee: u64,
+        metadata: Object<Metadata>
+    }
+
+    #[event]
+    struct FlashLoanFAEvent has drop, store {
+        amount: u64,
+        fee_amount: u64,
+        metadata: Object<Metadata>
     }
 
     #[event]
@@ -114,8 +140,16 @@ module spike_amm::coin_wrapper {
     }
 
     #[view]
-    public fun is_wrapper(metadata: Object<Metadata>): bool acquires WrapperAccount {
-        smart_table::contains(&wrapper_account().fungible_asset_to_coin, metadata)
+    public fun is_wrapper(metadata: Object<Metadata>): bool acquires WrapperAccount, WrapperAccountFA {
+        let is_v1 = smart_table::contains(&wrapper_account().fungible_asset_to_coin, metadata);
+        if (is_v1) {
+            return true
+        };
+        if (exists<WrapperAccountFA>(wrapper_address())) {
+            smart_table::contains(&wrapper_account_fa().wrapper_to_native, metadata)
+        } else {
+            false
+        }
     }
 
     #[view]
@@ -129,7 +163,7 @@ module spike_amm::coin_wrapper {
     }
 
     #[view]
-    public fun get_original(fungible_asset: Object<Metadata>): String acquires WrapperAccount {
+    public fun get_original(fungible_asset: Object<Metadata>): String acquires WrapperAccount, WrapperAccountFA {
         if (is_wrapper(fungible_asset)) {
             get_coin_type(fungible_asset)
         } else {
@@ -152,10 +186,13 @@ module spike_amm::coin_wrapper {
     public(friend) fun wrap<CoinType>(coins: Coin<CoinType>): FungibleAsset acquires WrapperAccount {
         create_fungible_asset<CoinType>();
 
-        let amount = coin::value(&coins);
+        let balance_before = coin::balance<CoinType>(wrapper_address());
         supra_account::deposit_coins(wrapper_address(), coins);
+        let balance_after = coin::balance<CoinType>(wrapper_address());
+        let actual_deposited = balance_after - balance_before;
+
         let mint_ref = &fungible_asset_data<CoinType>().mint_ref;
-        fungible_asset::mint(mint_ref, amount)
+        fungible_asset::mint(mint_ref, actual_deposited)
     }
 
     public(friend) fun unwrap<CoinType>(fa: FungibleAsset): Coin<CoinType> acquires WrapperAccount {
@@ -210,6 +247,7 @@ module spike_amm::coin_wrapper {
     public fun flash_loan<CoinType>(
         amount: u64
     ): (Coin<CoinType>, FlashLoanReceipt<CoinType>) acquires WrapperAccount {
+        amm_controller::assert_unpaused();
         let wrapper_acc = wrapper_account();
         let wrapper_signer = &account::create_signer_with_capability(&wrapper_acc.signer_cap);
         
@@ -217,7 +255,7 @@ module spike_amm::coin_wrapper {
 
         let loan_coins = coin::withdraw<CoinType>(wrapper_signer, amount);
         let bps = amm_controller::get_flash_loan_fee_bps();
-        let fee = (amount * bps) / 10000;
+        let fee = (amount * bps + 9999) / 10000;
 
         let receipt = FlashLoanReceipt { amount, fee };
 
@@ -312,4 +350,215 @@ module spike_amm::coin_wrapper {
         if (num < 10) string::utf8(vector[num + 48])
         else string::utf8(vector[num + 87])
     }
+
+
+
+    inline fun init_fa_if_needed(wrapper_signer: &signer) {
+        if (!exists<WrapperAccountFA>(signer::address_of(wrapper_signer))) {
+            move_to(wrapper_signer, WrapperAccountFA {
+                native_to_wrapper: smart_table::new(),
+                wrapper_to_native: smart_table::new(),
+            });
+        }
+    }
+
+    inline fun wrapper_account_fa(): &WrapperAccountFA acquires WrapperAccountFA {
+        borrow_global<WrapperAccountFA>(wrapper_address())
+    }
+
+    inline fun mut_wrapper_account_fa(): &mut WrapperAccountFA acquires WrapperAccountFA {
+        borrow_global_mut<WrapperAccountFA>(wrapper_address())
+    }
+
+    public(friend) fun create_fungible_asset_for_fa(native_metadata: Object<Metadata>): Object<Metadata> acquires WrapperAccount, WrapperAccountFA {
+        assert!(!is_wrapper(native_metadata), error::invalid_argument(ERROR_ALREADY_WRAPPED));
+        assert!(option::is_none(&coin::paired_coin(native_metadata)), error::invalid_argument(ERROR_USE_COIN_WRAPPER_V1));
+        
+        let wrapper_acc = wrapper_account();
+        let wrapper_signer = &account::create_signer_with_capability(&wrapper_acc.signer_cap);
+        init_fa_if_needed(wrapper_signer);
+
+        let wrapper_fa_acc = mut_wrapper_account_fa();
+        
+        if (!smart_table::contains(&wrapper_fa_acc.native_to_wrapper, native_metadata)) {
+            let symbol = fungible_asset::symbol(native_metadata);
+            let name = fungible_asset::name(native_metadata);
+            let decimals = fungible_asset::decimals(native_metadata);
+            
+            let mut_name = string::utf8(b"Wrapped ");
+            string::append(&mut mut_name, name);
+            let mut_symbol = string::utf8(b"w");
+            string::append(&mut mut_symbol, symbol);
+
+            let seed = object::object_address(&native_metadata);
+            let metadata_constructor_ref = &object::create_named_object(wrapper_signer, supra_framework::bcs::to_bytes(&seed));
+            
+            primary_fungible_store::create_primary_store_enabled_fungible_asset(
+                metadata_constructor_ref,
+                option::none(),
+                mut_name,
+                mut_symbol,
+                decimals,
+                string::utf8(b""),
+                string::utf8(b""),
+            );
+
+            let mint_ref = fungible_asset::generate_mint_ref(metadata_constructor_ref);
+            let burn_ref = fungible_asset::generate_burn_ref(metadata_constructor_ref);
+            let wrapper_metadata = object::object_from_constructor_ref<Metadata>(metadata_constructor_ref);
+            
+            smart_table::add(&mut wrapper_fa_acc.native_to_wrapper, native_metadata, FungibleAssetData {
+                metadata: wrapper_metadata,
+                mint_ref,
+                burn_ref,
+            });
+            smart_table::add(&mut wrapper_fa_acc.wrapper_to_native, wrapper_metadata, native_metadata);
+        };
+        smart_table::borrow(&wrapper_fa_acc.native_to_wrapper, native_metadata).metadata
+    }
+
+    public(friend) fun wrap_fa(native_fa: FungibleAsset): FungibleAsset acquires WrapperAccount, WrapperAccountFA {
+        let native_metadata = fungible_asset::asset_metadata(&native_fa);
+        create_fungible_asset_for_fa(native_metadata);
+
+        let balance_before = primary_fungible_store::balance(wrapper_address(), native_metadata);
+        primary_fungible_store::deposit(wrapper_address(), native_fa);
+        let balance_after = primary_fungible_store::balance(wrapper_address(), native_metadata);
+        let actual_deposited = balance_after - balance_before;
+        
+        let wrapper_fa_acc = wrapper_account_fa();
+        let data = smart_table::borrow(&wrapper_fa_acc.native_to_wrapper, native_metadata);
+        fungible_asset::mint(&data.mint_ref, actual_deposited)
+    }
+
+    public(friend) fun unwrap_fa(wrapper_fa: FungibleAsset): FungibleAsset acquires WrapperAccount, WrapperAccountFA {
+        let wrapper_metadata = fungible_asset::asset_metadata(&wrapper_fa);
+        let amount = fungible_asset::amount(&wrapper_fa);
+        
+        let wrapper_fa_acc = wrapper_account_fa();
+        let native_metadata = *smart_table::borrow(&wrapper_fa_acc.wrapper_to_native, wrapper_metadata);
+        let data = smart_table::borrow(&wrapper_fa_acc.native_to_wrapper, native_metadata);
+        
+        fungible_asset::burn(&data.burn_ref, wrapper_fa);
+        
+        let wrapper_acc = wrapper_account();
+        let wrapper_signer = &account::create_signer_with_capability(&wrapper_acc.signer_cap);
+        primary_fungible_store::withdraw(wrapper_signer, native_metadata, amount)
+    }
+
+    public fun flash_loan_fa(
+        metadata: Object<Metadata>,
+        amount: u64
+    ): (FungibleAsset, FlashLoanReceiptFA) acquires WrapperAccount {
+        amm_controller::assert_unpaused();
+        let wrapper_acc = wrapper_account();
+        let wrapper_signer = &account::create_signer_with_capability(&wrapper_acc.signer_cap);
+        
+        let bal = primary_fungible_store::balance(wrapper_address(), metadata);
+        assert!(bal >= amount, error::invalid_argument(ERROR_INSUFFICIENT_AMOUNT));
+
+        let loan_fa = primary_fungible_store::withdraw(wrapper_signer, metadata, amount);
+        let bps = amm_controller::get_flash_loan_fee_bps();
+        let fee = (amount * bps + 9999) / 10000;
+
+        let receipt = FlashLoanReceiptFA { amount, fee, metadata };
+
+        event::emit(FlashLoanFAEvent {
+            amount,
+            fee_amount: fee,
+            metadata
+        });
+
+        (loan_fa, receipt)
+    }
+
+    public fun repay_flash_loan_fa(
+        payment: FungibleAsset,
+        receipt: FlashLoanReceiptFA
+    ) {
+        let FlashLoanReceiptFA { amount, fee, metadata } = receipt;
+
+        let repayment_amount = fungible_asset::amount(&payment);
+        assert!(repayment_amount >= amount + fee, error::invalid_argument(ERROR_INVALID_REPAYMENT));
+        assert!(fungible_asset::asset_metadata(&payment) == metadata, error::invalid_argument(ERROR_INVALID_REPAYMENT));
+
+        primary_fungible_store::deposit(wrapper_address(), payment);
+    }
+
+    public entry fun collect_accumulated_fees_fa(
+        admin: &signer,
+        native_metadata: Object<Metadata>,
+        amount: u64,
+        to: address
+    ) acquires WrapperAccount, WrapperAccountFA {
+        assert!(signer::address_of(admin) == amm_controller::get_admin(), error::permission_denied(ERROR_NOT_ADMIN));
+
+        let wrapper_acc = wrapper_account();
+        let wrapper_signer = &account::create_signer_with_capability(&wrapper_acc.signer_cap);
+        
+        let total_real_balance = primary_fungible_store::balance(wrapper_address(), native_metadata);
+        
+        let wrapper_fa_acc = wrapper_account_fa();
+        let data = smart_table::borrow(&wrapper_fa_acc.native_to_wrapper, native_metadata);
+        let total_supply_fa = option::destroy_some(fungible_asset::supply(data.metadata));
+
+        let user_collateral = (total_supply_fa as u64);
+        let available_fees = if (total_real_balance > user_collateral) {
+            total_real_balance - user_collateral
+        } else {
+            0
+        };
+
+        assert!(amount <= available_fees, error::invalid_argument(ERROR_INSUFFICIENT_AMOUNT));
+
+        let fee_fa = primary_fungible_store::withdraw(wrapper_signer, native_metadata, amount);
+        primary_fungible_store::deposit(to, fee_fa);
+    }
+
+    #[view]
+    public fun is_wrapper_fa(metadata: Object<Metadata>): bool acquires WrapperAccountFA {
+        if (!exists<WrapperAccountFA>(wrapper_address())) { return false };
+        smart_table::contains(&wrapper_account_fa().wrapper_to_native, metadata)
+    }
+
+    #[view]
+    public fun get_original_fa(wrapper_metadata: Object<Metadata>): Object<Metadata> acquires WrapperAccountFA {
+        *smart_table::borrow(&wrapper_account_fa().wrapper_to_native, wrapper_metadata)
+    }
+
+    #[view]
+    public fun get_balance_fa(native_metadata: Object<Metadata>): u64 {
+        primary_fungible_store::balance(wrapper_address(), native_metadata)
+    }
+
+    #[view]
+    public fun get_wrapper_for_fa(native_metadata: Object<Metadata>): Object<Metadata> acquires WrapperAccountFA {
+        smart_table::borrow(&wrapper_account_fa().native_to_wrapper, native_metadata).metadata
+    }
+
+    // =================================================================
+    // POEL REWARDS SWEEP
+    // =================================================================
+
+    /// Permissionless function to harvest PoEL rewards accrued by wrapped iAssets and send them to the AMM fee collector.
+    public entry fun claim_and_sweep_poel() acquires WrapperAccount {
+        let wrapper_acc = borrow_global<WrapperAccount>(wrapper_address());
+        let wrapper_signer = &account::create_signer_with_capability(&wrapper_acc.signer_cap);
+        let wrapper_addr = signer::address_of(wrapper_signer);
+        
+        let balance_before = coin::balance<SupraCoin>(wrapper_addr);
+        
+        // Claim the rewards generated by the iAssets held in this wrapper vault
+        poel::withdraw_rewards(wrapper_signer);
+        
+        let balance_after = coin::balance<SupraCoin>(wrapper_addr);
+        let yield_earned = balance_after - balance_before;
+        
+        if (yield_earned > 0) {
+            let yield_coins = coin::withdraw<SupraCoin>(wrapper_signer, yield_earned);
+            let fee_to = amm_controller::get_fee_to();
+            coin::deposit(fee_to, yield_coins);
+        }
+    }
+
 }

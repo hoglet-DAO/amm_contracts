@@ -336,6 +336,13 @@ public entry fun initialize_launchpad_feature(admin: &signer) {
   }
 
   #[view]
+  public fun get_all_whitelisted_launchers(): vector<address> acquires LaunchpadConfig {
+      if (!exists<LaunchpadConfig>(amm_controller::get_signer_address())) { return vector::empty() };
+      let launchpad_config = safe_launchpad_config();
+      simple_map::keys(&launchpad_config.whitelist)
+  }
+
+  #[view]
   public fun get_creator_for_pair(pair_address: address): address acquires LaunchpadConfig {
       if (!exists<LaunchpadConfig>(amm_controller::get_signer_address())) { return @0x0 };
       let launchpad_config = safe_launchpad_config();

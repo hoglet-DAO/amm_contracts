@@ -71,12 +71,16 @@ module spike_amm::flash_loan_router {
         // 1. Decide which token to borrow (Wrapper vs Native)
         if (is_legacy) {
             let wrapper_metadata = coin_wrapper::get_wrapper<CoinType>();
-            // If the balance of the Wrapper in the pool is > 0, we assume it is a Wrapper Pool
-            if (amm_pair::balance_of(pair, wrapper_metadata) > 0) {
+            let native_metadata = get_smart_metadata_internal<CoinType>();
+            
+            let wrapper_bal = amm_pair::balance_of(pair, wrapper_metadata);
+            let native_bal = amm_pair::balance_of(pair, native_metadata);
+
+            if (wrapper_bal > native_bal) {
                 use_wrapper = true;
                 token_to_borrow = wrapper_metadata;
             } else {
-                token_to_borrow = get_smart_metadata_internal<CoinType>();
+                token_to_borrow = native_metadata;
             }
         } else {
             token_to_borrow = get_smart_metadata_internal<CoinType>();
@@ -115,17 +119,13 @@ module spike_amm::flash_loan_router {
     ) {
         let FlashLoanFromPoolAsCoinReceipt { pair_receipt, loan_amount: _ } = receipt;
         
-        // 1. Re-evaluate: Should we pay with Wrapper or Native?
-        // We use the same heuristic logic as in the borrow.
+        let token_borrowed = amm_pair::flash_loan_receipt_token(&pair_receipt);
         let is_legacy = coin_wrapper::is_supported<CoinType>();
         let use_wrapper = false;
 
         if (is_legacy) {
             let wrapper_metadata = coin_wrapper::get_wrapper<CoinType>();
-            // Check balance in the pair. 
-            // If balance > 0, it is a Wrapper pool.
-            // NOTE: If you emptied the pool 100% (balance=0), this will fail and assume Native.
-            if (amm_pair::balance_of(pair, wrapper_metadata) > 0) {
+            if (token_borrowed == wrapper_metadata) {
                 use_wrapper = true;
             };
         };
@@ -207,6 +207,24 @@ module spike_amm::flash_loan_router {
         coin_wrapper::get_wrapper<CoinType>()
     }
 
+    // ===================================================================
+    // 3. "VAULT" SCENARIO FOR NATIVE FA
+    // ===================================================================
+
+    public fun borrow_fa_from_vault(
+        token: Object<Metadata>,
+        amount: u64
+    ): (FungibleAsset, coin_wrapper::FlashLoanReceiptFA) {
+        coin_wrapper::flash_loan_fa(token, amount)
+    }
+
+    public fun repay_fa_to_vault(
+        payment: FungibleAsset,
+        receipt: coin_wrapper::FlashLoanReceiptFA
+    ) {
+        coin_wrapper::repay_flash_loan_fa(payment, receipt);
+    }
+
     fun get_smart_metadata_internal<CoinType>(): Object<Metadata> {
         let meta_opt = coin::paired_metadata<CoinType>();
         if (option::is_some(&meta_opt)) {
@@ -235,12 +253,6 @@ module spike_amm::flash_loan_router {
             0
         };
 
-        // If we have good liquidity in the Vault, we return 1 immediately.
-        // (Adjust the threshold of 1000 as needed)
-        if (vault_bal > 1000) {
-            return 1
-        };
-
         // 2. Check Pool (We try to see if the pool has the Wrapper or the Native)
         let native_meta = get_smart_metadata_internal<CoinType>();
         let pool_bal_native = amm_pair::balance_of(pair, native_meta);
@@ -253,24 +265,41 @@ module spike_amm::flash_loan_router {
 
         let max_pool_bal = if (pool_bal_wrapper > pool_bal_native) { pool_bal_wrapper } else { pool_bal_native };
 
-        if (max_pool_bal > 0) {
+        if (max_pool_bal > vault_bal && max_pool_bal > 0) {
             return 2 // Pool wins
-        } else if (vault_bal > 0) {
-            return 1 // Vault wins (in extremis)
+        } else if (vault_bal >= max_pool_bal && vault_bal > 0) {
+            return 1 // Vault wins
         } else {
-            0
+            return 0
         }
     }
 
     #[view]
     public fun expected_fee(amount: u64): u64 {
         let bps = amm_controller::get_flash_loan_fee_bps();
-        (amount * bps) / 10000
+        ((((amount as u128) * (bps as u128) + 9999) / 10000) as u64)
     }
 
     #[view]
     public fun max_flash_loan_vault<CoinType>(): u64 {
         coin_wrapper::get_balance<CoinType>()
+    }
+
+    #[view]
+    public fun max_flash_loan_pool_smart<CoinType>(pair: Object<amm_pair::Pair>): u64 {
+        let is_legacy = coin_wrapper::is_supported<CoinType>();
+        if (is_legacy) {
+            let wrapper_metadata = coin_wrapper::get_wrapper<CoinType>();
+            let native_metadata = get_smart_metadata_internal<CoinType>();
+            
+            let wrapper_bal = amm_pair::balance_of(pair, wrapper_metadata);
+            let native_bal = amm_pair::balance_of(pair, native_metadata);
+
+            if (wrapper_bal > native_bal) { wrapper_bal } else { native_bal }
+        } else {
+            let native_metadata = get_smart_metadata_internal<CoinType>();
+            amm_pair::balance_of(pair, native_metadata)
+        }
     }
 
     #[view]
@@ -281,7 +310,28 @@ module spike_amm::flash_loan_router {
     #[view]
     public fun get_native_metadata<CoinType>(): Object<Metadata> {
         get_smart_metadata_internal<CoinType>()
+    }
 
+    #[view]
+    public fun check_best_liquidity_source_fa(
+        pair: Object<amm_pair::Pair>,
+        token: Object<Metadata>
+    ): u8 {
+        let vault_bal = coin_wrapper::get_balance_fa(token);
+        let pool_bal = amm_pair::balance_of(pair, token);
+
+        if (pool_bal > vault_bal && pool_bal > 0) {
+            return 2 // Pool wins
+        } else if (vault_bal >= pool_bal && vault_bal > 0) {
+            return 1 // Vault wins
+        } else {
+            return 0
+        }
+    }
+
+    #[view]
+    public fun max_flash_loan_vault_fa(token: Object<Metadata>): u64 {
+        coin_wrapper::get_balance_fa(token)
     }
 
 }

@@ -15,6 +15,7 @@ module spike_amm::amm_router {
     use spike_amm::coin_wrapper;
     use razor_libs::utils;
     use razor_libs::sort;
+    use hoglet_buffer::manager;
 
     const ERROR_EXPIRED: u64 = 1;
     const ERROR_INSUFFICIENT_INPUT_AMOUNT: u64 = 2;
@@ -316,7 +317,22 @@ module spike_amm::amm_router {
         tokenB: address
     ) {
         let bwsup_address = get_address_BWSUP();
-        assert!(tokenB == bwsup_address, error::invalid_argument(ERROR_TOKEN_B_MUST_BE_BWSUP));
+        let is_supra = (tokenB == bwsup_address);
+        
+        let supported_iassets = manager::get_all_supported_iassets();
+        let is_iasset = false;
+        let len = std::vector::length(&supported_iassets);
+        let i = 0;
+        while (i < len) {
+            let asset = std::vector::borrow(&supported_iassets, i);
+            if (object::object_address(asset) == tokenB) {
+                is_iasset = true;
+                break
+            };
+            i = i + 1;
+        };
+
+        assert!(is_supra || is_iasset, error::invalid_argument(ERROR_TOKEN_B_MUST_BE_BWSUP));
         amm_factory::create_pair_locked(sender, tokenA, tokenB);
     }
 
@@ -370,6 +386,62 @@ module spike_amm::amm_router {
         }
     }
 
+    public fun add_liquidity_from_launchpad_fa_beta(
+        sender: &signer,
+        token: address,
+        quote_token: address,
+        amount_token_desired: u64,
+        amount_token_min: u64,
+        amount_quote_desired: u64,
+        amount_quote_min: u64,
+        to: address,
+        deadline: u64
+    ): (u64, u64, u64, Object<Metadata>) {
+        let token = get_canonical_address(token);
+        let quote_token = get_canonical_address(quote_token);
+        let pair_address = amm_factory::get_pair(token, quote_token);
+        assert!(pair_address != @0x0, error::invalid_argument(ERROR_INVALID_PATH));
+
+        // unlock the pair from launchpad restrictions
+        amm_factory::verify_and_unlock_pair(sender, pair_address);
+
+        add_liquidity_aux(
+            sender,
+            token,
+            quote_token,
+            amount_token_desired,
+            amount_quote_desired,
+            amount_token_min,
+            amount_quote_min,
+            to,
+            deadline
+        )
+    }
+
+    public fun add_liquidity_from_launchpad_fa(
+        sender: &signer,
+        token: address,
+        quote_token: address,
+        amount_token_desired: u64,
+        amount_token_min: u64,
+        amount_quote_desired: u64,
+        amount_quote_min: u64,
+        to: address,
+        deadline: u64
+    ) {
+        let (_, _, _, _) = add_liquidity_from_launchpad_fa_beta(
+            sender,
+            token,
+            quote_token,
+            amount_token_desired,
+            amount_token_min,
+            amount_quote_desired,
+            amount_quote_min,
+            to,
+            deadline
+        );
+    }
+    
     public fun add_liquidity_from_launchpad_aux_beta(
         sender: &signer,
         token: address,
@@ -1119,26 +1191,17 @@ module spike_amm::amm_router {
         let (token0, token1) = sort::sort_two_tokens(from_token, to_token);
         let pair = amm_pair::liquidity_pool(token0, token1);
 
-        let amount_in = fungible_asset::amount(&token_in);
-
-        let (reserve0, reserve1, _) = amm_pair::get_reserves(pair);
-        let (reserve_in, reserve_out) = if (from_token == token0) {
-            (reserve0, reserve1)
-        } else {
-            (reserve1, reserve0)
-        };
-
-        let amount_out = utils::get_amount_out(amount_in, reserve_in, reserve_out);
         let (zero, coins_out);
         if (sort::is_sorted_two(from_token, to_token)) {
-            (zero, coins_out) = amm_pair::swap(sender, pair, token_in, 0, fungible_asset::zero(to_token), amount_out, to);
+            (zero, coins_out) = amm_pair::swap_fee_on_transfer(sender, pair, token_in, fungible_asset::zero(to_token), to);
         } else {
-            (coins_out, zero) = amm_pair::swap(sender, pair, fungible_asset::zero(to_token), amount_out, token_in, 0, to);
+            (coins_out, zero) = amm_pair::swap_fee_on_transfer(sender, pair, fungible_asset::zero(to_token), token_in, to);
         };
         
         fungible_asset::destroy_zero(zero);
         coins_out
     }
+
 
     //SWAP FUNCTIONS FUNGIBLE ASSETS
 public entry fun swap_exact_tokens_for_tokens(
