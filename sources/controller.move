@@ -2,6 +2,7 @@ module spike_amm::amm_controller {
   use std::signer;
   use std::error;
   use supra_framework::object::{Self, ExtendRef};
+  use supra_framework::event;
 
   friend spike_amm::amm_factory;
   friend spike_amm::amm_pair;
@@ -31,6 +32,31 @@ module spike_amm::amm_controller {
 
   struct FlashLoanConfig has key {
     fee_bps: u64,
+  }
+
+  #[event]
+  struct SetFlashLoanFeeEvent has drop, store {
+    new_fee_bps: u64,
+  }
+
+  #[event]
+  struct PauseEvent has drop, store {
+    is_paused: bool,
+  }
+
+  #[event]
+  struct SetSwapFeeEvent has drop, store {
+    swap_fee: u8,
+  }
+
+  #[event]
+  struct SetFeeToEvent has drop, store {
+    fee_to: address,
+  }
+
+  #[event]
+  struct SetAdminEvent has drop, store {
+    admin_address: address,
   }
 
   fun init_module(deployer: &signer) {
@@ -112,7 +138,8 @@ module spike_amm::amm_controller {
           config.fee_bps = new_fee_bps;
       } else {
             move_to(&contract_signer, FlashLoanConfig { fee_bps: new_fee_bps });
-      }
+      };
+      event::emit(SetFlashLoanFeeEvent { new_fee_bps });
   }
 
   public(friend) fun pause(account: &signer) acquires SwapConfig {
@@ -121,6 +148,7 @@ module spike_amm::amm_controller {
     assert!(signer::address_of(account) == swap_config.current_admin, error::permission_denied(ERROR_FORBIDDEN));
 
     swap_config.paused = true;
+    event::emit(PauseEvent { is_paused: true });
   }
 
   public(friend) fun unpause(account: &signer) acquires SwapConfig {
@@ -128,6 +156,7 @@ module spike_amm::amm_controller {
     let swap_config = borrow_global_mut<SwapConfig>(@spike_amm);
     assert!(signer::address_of(account) == swap_config.current_admin, error::permission_denied(ERROR_FORBIDDEN));
     swap_config.paused = false;
+    event::emit(PauseEvent { is_paused: false });
   }
 
   
@@ -139,6 +168,7 @@ module spike_amm::amm_controller {
     assert!(signer::address_of(account) == swap_config.current_admin, error::permission_denied(ERROR_FORBIDDEN));
     assert!(swap_fee <= 50, error::invalid_argument(ERROR_FEE_TOO_HIGH));
     swap_config.swap_fee = swap_fee;
+    event::emit(SetSwapFeeEvent { swap_fee });
   }
 
   public(friend) fun set_fee_to(
@@ -148,6 +178,7 @@ module spike_amm::amm_controller {
     let swap_config = borrow_global_mut<SwapConfig>(@spike_amm);
     assert!(signer::address_of(account) == swap_config.current_admin, error::permission_denied(ERROR_FORBIDDEN));
     swap_config.fee_to = fee_to;
+    event::emit(SetFeeToEvent { fee_to });
   }
 
   public(friend) fun set_admin_address(
@@ -178,6 +209,7 @@ module spike_amm::amm_controller {
     assert!(swap_config.pending_admin != @0x0, error::invalid_state(ERROR_NO_PENDING_ADMIN));
     swap_config.current_admin = account_addr;
     swap_config.pending_admin = @0x0;
+    event::emit(SetAdminEvent { admin_address: account_addr });
   }
 
   inline fun safe_swap_config(): &SwapConfig acquires SwapConfig {

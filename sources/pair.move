@@ -6,6 +6,7 @@ module spike_amm::amm_pair {
   use std::vector;
   use std::error;
 
+  use supra_framework::supra_account;
   use supra_framework::event;
   use supra_framework::dispatchable_fungible_asset;
   use supra_framework::fungible_asset::{Self, FungibleAsset, FungibleStore, MintRef, BurnRef, TransferRef, Metadata};
@@ -18,6 +19,7 @@ module spike_amm::amm_pair {
   use spike_amm::amm_controller;
   
   use dfmm_framework::poel;
+  use dfmm_framework::iAsset;
 
   use razor_libs::math;
   use razor_libs::fixedpoint64;
@@ -352,8 +354,8 @@ module spike_amm::amm_pair {
     let lp_token = object::object_from_constructor_ref<Metadata>(pair_constructor_ref);
     fungible_asset::create_store(pair_constructor_ref, lp_token);
     
-    // Removed invalid coin::register<SupraCoin>(pair_signer) because Objects cannot have CoinStore
-
+    // Register SupraCoin store by creating a full account for the address, ensuring it can receive PoEL rewards seamlessly.
+    supra_account::create_account(object::address_from_constructor_ref(pair_constructor_ref));
     move_to(pair_signer, Pair {
       token0: create_token_store(pair_signer, token0),
       token1: create_token_store(pair_signer, token1),
@@ -392,30 +394,32 @@ module spike_amm::amm_pair {
       
       let pair_signer = &generate_signer_for_pair(pair);
       
+      let user_rewards = iAsset::get_user_rewards(pair_addr);
+      let (allocated, withdrawable, _, _, _) = iAsset::deconstruct_user_rewards(&user_rewards);
+      
       // Phase Duration set to 1 day (86400 seconds)
       let current_time = timestamp::now_seconds();
       let phases_since_epoch = current_time / 86400;
       
       if (phases_since_epoch % 2 == 0) {
           // Even phase (Day 1): Claim rewards to start the lockup timer
-          poel::claim_rewards(pair_signer);
+          if (allocated > 0) {
+              poel::claim_rewards(pair_signer);
+          };
       } else {
           // Odd phase (Day 2): Lockup cycle has passed, safe to withdraw
-          let supra_metadata = option::destroy_some(coin::paired_metadata<SupraCoin>());
-          let balance_before = primary_fungible_store::balance(pair_addr, supra_metadata);
-          
-          // Withdraw rewards from PoEL (deposits FA into the pair's PrimaryFungibleStore)
-          poel::withdraw_rewards(pair_signer);
-          
-          let balance_after = primary_fungible_store::balance(pair_addr, supra_metadata);
-          let yield_earned = balance_after - balance_before;
-          
-          if (yield_earned > 0) {
-              // Extract the exact yield and send it to the official protocol fee_to
-              let yield_fa = primary_fungible_store::withdraw(pair_signer, supra_metadata, yield_earned);
-              let fee_to = amm_controller::get_fee_to();
-              primary_fungible_store::deposit(fee_to, yield_fa);
-          }
+          if (withdrawable > 0) {
+              poel::withdraw_rewards(pair_signer);
+          };
+      };
+      
+      // Sweep any accumulated SupraCoin (from PoEL rewards OR user donations)
+      let total_balance = coin::balance<SupraCoin>(pair_addr);
+      if (total_balance > 0) {
+          // Since AMM liquidity uses internal FA wrappers, any native SupraCoin 
+          // in the pair object is pure reward/surplus and can be safely swept entirely.
+          let fee_to = amm_controller::get_fee_to();
+          supra_account::transfer_coins<SupraCoin>(pair_signer, fee_to, total_balance);
       }
   }
 

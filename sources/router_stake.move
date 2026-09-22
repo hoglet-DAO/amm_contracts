@@ -16,6 +16,7 @@ module spike_staking::router_stake {
     const ERR_USE_COIN_FUNCTION_FOR_SUPRA: u64 = 1;
     const ERR_STAKE_AMOUNT_MUST_BE_POSITIVE: u64 = 2;
     const ERR_REWARD_AMOUNT_MUST_BE_POSITIVE: u64 = 3;
+    const ERR_CANNOT_EXTRACT_INTERNAL_FA: u64 = 4;
 
     const WSUP: address = @0xa;
 
@@ -528,6 +529,9 @@ module spike_staking::router_stake {
         let user_addr = signer::address_of(user);
         let unstaked_fa = stake_fa::unstake(user, pool_key, unstake_amount);
 
+        let fa_metadata = object::address_to_object<Metadata>(stake_addr);
+        assert!(!coin_wrapper::is_wrapper(fa_metadata), error::invalid_argument(ERR_CANNOT_EXTRACT_INTERNAL_FA));
+
         ensure_primary_store_for_address(user_addr, stake_addr);
 
         primary_fungible_store::deposit(user_addr, unstaked_fa);
@@ -575,6 +579,9 @@ module spike_staking::router_stake {
         );
         let user_addr = signer::address_of(user);
         let unstaked_fa = stake_fa::unstake(user, pool_key, unstake_amount);
+
+        let fa_metadata = object::address_to_object<Metadata>(stake_addr);
+        assert!(!coin_wrapper::is_wrapper(fa_metadata), error::invalid_argument(ERR_CANNOT_EXTRACT_INTERNAL_FA));
 
         ensure_primary_store_for_address(user_addr, stake_addr);
 
@@ -633,6 +640,9 @@ module spike_staking::router_stake {
         );
         let user_addr = signer::address_of(user);
         let (_, reward_fa) = stake_fa::harvest(user, pool_key);
+
+        let fa_metadata = object::address_to_object<Metadata>(reward_addr);
+        assert!(!coin_wrapper::is_wrapper(fa_metadata), error::invalid_argument(ERR_CANNOT_EXTRACT_INTERNAL_FA));
 
         ensure_primary_store_for_address(user_addr, reward_addr);
 
@@ -917,6 +927,9 @@ module spike_staking::router_stake {
        
         if (option::is_some(&fa_option)) {
             let unstaked_fa = option::extract(&mut fa_option);
+
+            let fa_metadata = object::address_to_object<Metadata>(stake_addr);
+            assert!(!coin_wrapper::is_wrapper(fa_metadata), error::invalid_argument(ERR_CANNOT_EXTRACT_INTERNAL_FA));
 
             ensure_primary_store_for_address(user_addr, stake_addr);
 

@@ -37,6 +37,7 @@ module spike_amm::amm_router {
     const ERROR_USE_COIN_FUNCTION: u64 = 18;
     const ERROR_USE_BWSUP_INSTEAD: u64 = 19;
     const ERROR_INVALID_TOKEN_ADDRESS: u64 = 20;
+    const ERROR_CANNOT_EXTRACT_INTERNAL_FA: u64 = 21;
 
     const WSUP: address = @0xa;
     const MIN_PATH_LENGTH: u64 = 2;
@@ -241,6 +242,7 @@ module spike_amm::amm_router {
             let supra_coin = coin_wrapper::unwrap<SupraCoin>(asset);
             supra_account::deposit_coins(to, supra_coin);
         } else {
+            assert!(!coin_wrapper::is_wrapper(metadata), error::invalid_argument(ERROR_CANNOT_EXTRACT_INTERNAL_FA));
             primary_fungible_store::deposit(to, asset);
         }
     }
@@ -332,7 +334,10 @@ module spike_amm::amm_router {
             i = i + 1;
         };
 
-        assert!(is_supra || is_iasset, error::invalid_argument(ERROR_TOKEN_B_MUST_BE_BWSUP));
+        assert!(
+            is_supra || is_iasset || amm_factory::is_whitelisted(signer::address_of(sender)),
+            error::invalid_argument(ERROR_TOKEN_B_MUST_BE_BWSUP)
+        );
         amm_factory::create_pair_locked(sender, tokenA, tokenB);
     }
 
@@ -999,6 +1004,10 @@ module spike_amm::amm_router {
             error::invalid_state(ERROR_INSUFFICIENT_OUTPUT_AMOUNT)
         );
 
+        let metaA = fungible_asset::asset_metadata(&assetA);
+        let metaB = fungible_asset::asset_metadata(&assetB);
+        assert!(!coin_wrapper::is_wrapper(metaA), error::invalid_argument(ERROR_CANNOT_EXTRACT_INTERNAL_FA));
+        assert!(!coin_wrapper::is_wrapper(metaB), error::invalid_argument(ERROR_CANNOT_EXTRACT_INTERNAL_FA));
         primary_fungible_store::deposit(to, assetA);
         primary_fungible_store::deposit(to, assetB);
 
@@ -1112,6 +1121,8 @@ module spike_amm::amm_router {
         ); 
 
         let to = signer::address_of(sender);
+        let meta_token = fungible_asset::asset_metadata(&asset_token);
+        assert!(!coin_wrapper::is_wrapper(meta_token), error::invalid_argument(ERROR_CANNOT_EXTRACT_INTERNAL_FA));
         primary_fungible_store::deposit(to, asset_token);
         let legacy_coin = coin_wrapper::unwrap<CoinType>(asset_coin);
         supra_account::deposit_coins(to, legacy_coin);
@@ -1248,6 +1259,10 @@ public entry fun swap_exact_tokens_for_tokens(
             final_amount >= amount_out_min,
             error::invalid_state(ERROR_INSUFFICIENT_OUTPUT_AMOUNT)
         );
+
+        let meta_asset = fungible_asset::asset_metadata(&current_processing_asset);
+
+        assert!(!coin_wrapper::is_wrapper(meta_asset), error::invalid_argument(ERROR_CANNOT_EXTRACT_INTERNAL_FA));
 
         primary_fungible_store::deposit(to, current_processing_asset);
     }
@@ -1579,6 +1594,8 @@ public entry fun swap_exact_tokens_for_tokens(
         deadline: u64,
     ) {
         let current_processing_asset = swap_exact_supra_for_tokens_internal(sender, amount_supra, amount_out_min, path, to, deadline, false);
+        let meta_asset = fungible_asset::asset_metadata(&current_processing_asset);
+        assert!(!coin_wrapper::is_wrapper(meta_asset), error::invalid_argument(ERROR_CANNOT_EXTRACT_INTERNAL_FA));
         primary_fungible_store::deposit(to, current_processing_asset);
     }
 
@@ -1683,6 +1700,8 @@ public entry fun swap_exact_tokens_for_tokens(
             false
         );
         let sender_addr = signer::address_of(sender);
+        let meta_asset = fungible_asset::asset_metadata(&current_processing_asset);
+        assert!(!coin_wrapper::is_wrapper(meta_asset), error::invalid_argument(ERROR_CANNOT_EXTRACT_INTERNAL_FA));
         primary_fungible_store::deposit(sender_addr, current_processing_asset);
         unwrap_beta<SupraCoin>(sender, to, amount_out);
     }
@@ -1782,6 +1801,8 @@ public entry fun swap_exact_tokens_for_tokens(
         );
         let sender_addr = signer::address_of(sender);
         let bwsup_amount = fungible_asset::amount(&current_processing_asset);
+        let meta_asset = fungible_asset::asset_metadata(&current_processing_asset);
+        assert!(!coin_wrapper::is_wrapper(meta_asset), error::invalid_argument(ERROR_CANNOT_EXTRACT_INTERNAL_FA));
         primary_fungible_store::deposit(sender_addr, current_processing_asset);
         unwrap_beta<SupraCoin>(sender, to, bwsup_amount);
     }

@@ -101,10 +101,11 @@ module spike_amm::amm_oracle {
     let pair_observations = &mut oracle_mut.pair_observations;
 
     if (!simple_map::contains_key(pair_observations, &pair)) {
+        let (price_0_cumulative, price_1_cumulative, _) = oracle_library::current_cumulative_prices(pair);
         simple_map::add(pair_observations, pair, Observation {
             timestamp: timestamp::now_seconds(),
-            price_0_cumulative: 0,
-            price_1_cumulative: 0,
+            price_0_cumulative,
+            price_1_cumulative,
         });
         return true
     };
@@ -214,7 +215,8 @@ module spike_amm::amm_oracle {
     }
   }
 
-  fun consult_v2(
+  #[view]
+  public fun consult_v2(
     token_in: Object<Metadata>,
     token_out: Object<Metadata>,
 ): u128 acquires Oracle {
@@ -226,6 +228,11 @@ module spike_amm::amm_oracle {
 
     let oracle = borrow_global<Oracle>(signer_address);
     let pair_observations = &oracle.pair_observations;
+    
+    if (!simple_map::contains_key(pair_observations, &pair)) {
+      return 0
+    };
+
     let (price_0_cumulative, price_1_cumulative, _) = oracle_library::current_cumulative_prices(pair);
 
     let observation = simple_map::borrow(pair_observations, &pair);
@@ -234,9 +241,17 @@ module spike_amm::amm_oracle {
     let (token0, _) = sort::sort_two_tokens(token_in, token_out);
     
     let price_delta = if (token0 == token_in) {
-      price_0_cumulative - observation.price_0_cumulative
+      if (price_0_cumulative < observation.price_0_cumulative) {
+        MAX_U128 - observation.price_0_cumulative + price_0_cumulative + 1
+      } else {
+        price_0_cumulative - observation.price_0_cumulative
+      }
     } else {
-      price_1_cumulative - observation.price_1_cumulative
+      if (price_1_cumulative < observation.price_1_cumulative) {
+        MAX_U128 - observation.price_1_cumulative + price_1_cumulative + 1
+      } else {
+        price_1_cumulative - observation.price_1_cumulative
+      }
     };
 
     assert!(time_elapsed > 0, ERROR_TIME_ELAPSED_ZERO);
@@ -267,13 +282,13 @@ module spike_amm::amm_oracle {
   #[view]
   public fun get_quantity_v2(token: Object<Metadata>, amount: u64): u128 acquires Oracle {
     let signer_address = amm_controller::get_signer_address();
-    let decimal = fungible_asset::decimals(token);
     let anchor_token = borrow_global<Oracle>(signer_address).anchor_token;
     let quantity;
     if (token == anchor_token) {
       quantity = (amount as u128)
     } else {
-      quantity = get_average_price_v2(token) * (amount as u128) / (math64::pow(10, (decimal as u64)) as u128)
+      let raw_price_q64 = consult_v2(token, anchor_token);
+      quantity = ((((raw_price_q64 as u256) * (amount as u256)) >> 64) as u128)
     };
 
     quantity
@@ -366,7 +381,7 @@ module spike_amm::amm_oracle {
           );
       };
 
-      raw_price_q64 * (decimal_factor as u128)
+      (raw_price_q64 * (decimal_factor as u128)) >> 64
   }
 
   #[view]
@@ -465,12 +480,16 @@ module spike_amm::amm_oracle {
     let total_supply = amm_pair::lp_token_supply(lp_token);
 
     let (token0, token1) = amm_pair::unpack_pair(lp_token);
-    let token0_decimal = fungible_asset::decimals(token0);
-    let token1_decimal = fungible_asset::decimals(token1);
     let (reserve0, reserve1, _) = amm_pair::get_reserves(lp_token);
 
-    let token0_value = get_average_price_v2(token0) * (reserve0 as u128) / ((math64::pow(10, (token0_decimal as u64))) as u128);
-    let token1_value = get_average_price_v2(token1) * (reserve1 as u128) / ((math64::pow(10, (token1_decimal as u64))) as u128);
+    let signer_address = amm_controller::get_signer_address();
+    let anchor_token = borrow_global<Oracle>(signer_address).anchor_token;
+
+    let raw_price0_q64 = if (token0 == anchor_token) { 1 << 64 } else { consult_v2(token0, anchor_token) };
+    let raw_price1_q64 = if (token1 == anchor_token) { 1 << 64 } else { consult_v2(token1, anchor_token) };
+
+    let token0_value = ((((raw_price0_q64 as u256) * (reserve0 as u256)) >> 64) as u128);
+    let token1_value = ((((raw_price1_q64 as u256) * (reserve1 as u256)) >> 64) as u128);
 
     let value = (token0_value + token1_value) * (amount as u128) / total_supply;
     value
@@ -488,8 +507,8 @@ module spike_amm::amm_oracle {
     let block_info = &borrow_global<Oracle>(signer_address).block_info;
     let height_diff = block::get_current_block_height() - block_info.height;
     assert!(height_diff > 0, error::invalid_state(ERROR_HEIGHT_DIFF_ZERO));
-    let time_diff = timestamp::now_seconds() - block_info.timestamp;
-    ((time_diff / height_diff) as u64)
+    let time_diff_ms = (timestamp::now_microseconds() / 1000) - (block_info.timestamp * 1000);
+    ((time_diff_ms / height_diff) as u64)
   }
 
   public entry fun add_router_token(sender: &signer, token: Object<Metadata>) acquires Oracle {

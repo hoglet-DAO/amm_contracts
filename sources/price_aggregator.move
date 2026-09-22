@@ -27,20 +27,25 @@ module spike_amm::price_aggregator {
         };
         
         let from_token_obj = object::address_to_object<Metadata>(token_address);
-        let price_token_scaled = amm_oracle::get_current_price(from_token_obj);
+        let anchor_token = amm_oracle::get_anchor_token();
+        let price_token_q64 = amm_oracle::consult_v2(from_token_obj, anchor_token);
 
-        if (price_token_scaled == 0) {
+        if (price_token_q64 == 0) {
             return (0, 0)
         };
         
         let (price_supra_in_usd_scaled, supra_usd_decimals, _, _) = supra_oracle_storage::get_price(SUPRA_USD_PAIR_ID);
         assert!(price_supra_in_usd_scaled > 0, error::invalid_argument(E_PRICE_IS_ZERO));
-        assert!(price_supra_in_usd_scaled <= (MAX_U128 / price_token_scaled), error::invalid_state(E_MULTIPLICATION_OVERFLOW));
 
-        let product_scaled = price_token_scaled * price_supra_in_usd_scaled;
-        let final_price_scaled = product_scaled / SUPRA_AMM_DECIMALS_FACTOR;
+        let token_decimals = supra_framework::fungible_asset::decimals(from_token_obj);
+        let decimal_factor = aptos_std::math64::pow(10, (token_decimals as u64));
 
-        (final_price_scaled, supra_usd_decimals)
+        let product_q64 = (price_token_q64 as u256) * (price_supra_in_usd_scaled as u256);
+        let product_with_decimals_q64 = product_q64 * (decimal_factor as u256);
+
+        let final_price_scaled = (product_with_decimals_q64 / (SUPRA_AMM_DECIMALS_FACTOR as u256)) >> 64;
+
+        ((final_price_scaled as u128), supra_usd_decimals)
     }
 
     #[view]
