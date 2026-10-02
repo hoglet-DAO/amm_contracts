@@ -86,7 +86,7 @@ module spike_amm::amm_router {
             (reserve_a, reserve_b) = (reserve_b, reserve_a)
         };
 
-        if (reserve_a == 0 && reserve_b == 0) {
+        if (amm_pair::lp_token_supply(pair) == 0 || (reserve_a == 0 && reserve_b == 0)) {
             (amount_a_desired, amount_b_desired)
         } else {
             let amount_b_optimal = utils::quote(amount_a_desired, reserve_a, reserve_b);
@@ -242,7 +242,6 @@ module spike_amm::amm_router {
             let supra_coin = coin_wrapper::unwrap<SupraCoin>(asset);
             supra_account::deposit_coins(to, supra_coin);
         } else {
-            assert!(!coin_wrapper::is_wrapper(metadata), error::invalid_argument(ERROR_CANNOT_EXTRACT_INTERNAL_FA));
             primary_fungible_store::deposit(to, asset);
         }
     }
@@ -1048,6 +1047,7 @@ module spike_amm::amm_router {
         let token = get_canonical_address(token);
 
         let token_object = object::address_to_object<Metadata>(token);
+        assert!(!coin_wrapper::is_wrapper(token_object), error::invalid_argument(ERROR_CANNOT_EXTRACT_INTERNAL_FA));
         let supra_object = coin_wrapper::get_wrapper<SupraCoin>();
 
         let (asset_token, asset_supra) = remove_liquidity_internal(
@@ -1325,7 +1325,14 @@ public entry fun swap_exact_tokens_for_tokens(
         let sender_addr = signer::address_of(sender);
 
         smart_inject_path_start<CoinType>(&mut path);
-        assert!(vector::length(&path) >= MIN_PATH_LENGTH, error::invalid_argument(ERROR_INVALID_PATH_LENGTH));
+        let len = vector::length(&path);
+        assert!(len >= MIN_PATH_LENGTH, error::invalid_argument(ERROR_INVALID_PATH_LENGTH));
+
+        let end_token_metadata = object::address_to_object<Metadata>(*vector::borrow(&path, len - 1));
+        if (*vector::borrow(&path, len - 1) != get_address_BWSUP()) {
+            assert!(!coin_wrapper::is_wrapper(end_token_metadata), error::invalid_argument(ERROR_CANNOT_EXTRACT_INTERNAL_FA));
+        };
+
         wrap_beta<CoinType>(sender, sender_addr, amount_coin);
 
         swap_exact_input_internal(sender, amount_coin, amount_out_min, path, to);
@@ -1341,6 +1348,11 @@ public entry fun swap_exact_tokens_for_tokens(
     ) {
         ensure(deadline);
         let path = normalize_path(path);
+        let len = vector::length(&path);
+        assert!(len >= MIN_PATH_LENGTH, error::invalid_argument(ERROR_INVALID_PATH_LENGTH));
+        let end_token_metadata = object::address_to_object<Metadata>(*vector::borrow(&path, len - 1));
+        assert!(!coin_wrapper::is_wrapper(end_token_metadata), error::invalid_argument(ERROR_CANNOT_EXTRACT_INTERNAL_FA));
+
         let total_amount_in_calculated = calculate_amount_in_for_exact_out(path, amount_out);
         assert!(
             total_amount_in_calculated <= amount_in_coin_max,
@@ -1440,7 +1452,14 @@ public entry fun swap_exact_tokens_for_tokens(
         let path = normalize_path(path);
 
         smart_inject_path_start<CoinType>(&mut path);
-        assert!(vector::length(&path) >= MIN_PATH_LENGTH, error::invalid_argument(ERROR_INVALID_PATH_LENGTH));
+        let len = vector::length(&path);
+        assert!(len >= MIN_PATH_LENGTH, error::invalid_argument(ERROR_INVALID_PATH_LENGTH));
+
+        let end_token_metadata = object::address_to_object<Metadata>(*vector::borrow(&path, len - 1));
+        if (*vector::borrow(&path, len - 1) != get_address_BWSUP()) {
+            assert!(!coin_wrapper::is_wrapper(end_token_metadata), error::invalid_argument(ERROR_CANNOT_EXTRACT_INTERNAL_FA));
+        };
+
         let sender_addr = signer::address_of(sender);
 
         let total_amount_in_calculated = calculate_amount_in_for_exact_out(path, amount_out);
@@ -1485,6 +1504,9 @@ public entry fun swap_exact_tokens_for_tokens(
 
         let final_length = vector::length(&path);
         assert!(final_length >= MIN_PATH_LENGTH, error::invalid_argument(ERROR_INVALID_PATH_LENGTH));
+
+        let end_token_metadata = object::address_to_object<Metadata>(*vector::borrow(&path, final_length - 1));
+        assert!(!coin_wrapper::is_wrapper(end_token_metadata), error::invalid_argument(ERROR_CANNOT_EXTRACT_INTERNAL_FA));
 
         let sender_addr = signer::address_of(sender);
 
@@ -1700,8 +1722,6 @@ public entry fun swap_exact_tokens_for_tokens(
             false
         );
         let sender_addr = signer::address_of(sender);
-        let meta_asset = fungible_asset::asset_metadata(&current_processing_asset);
-        assert!(!coin_wrapper::is_wrapper(meta_asset), error::invalid_argument(ERROR_CANNOT_EXTRACT_INTERNAL_FA));
         primary_fungible_store::deposit(sender_addr, current_processing_asset);
         unwrap_beta<SupraCoin>(sender, to, amount_out);
     }
@@ -1801,8 +1821,6 @@ public entry fun swap_exact_tokens_for_tokens(
         );
         let sender_addr = signer::address_of(sender);
         let bwsup_amount = fungible_asset::amount(&current_processing_asset);
-        let meta_asset = fungible_asset::asset_metadata(&current_processing_asset);
-        assert!(!coin_wrapper::is_wrapper(meta_asset), error::invalid_argument(ERROR_CANNOT_EXTRACT_INTERNAL_FA));
         primary_fungible_store::deposit(sender_addr, current_processing_asset);
         unwrap_beta<SupraCoin>(sender, to, bwsup_amount);
     }
